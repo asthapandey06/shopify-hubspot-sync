@@ -8,9 +8,14 @@
     "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc",
     "start:api": "node dist/server.js",
-    "start:worker": "node dist/worker.js"
+    "start:worker": "node dist/worker.js",
+    "dev": "tsx watch src/all.ts",
+    "start": "node dist/all.js",
+    "register-webhook": "tsx src/register-webhook.ts"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "bullmq": "^5.0.0",
     "dotenv": "^16.4.5",
