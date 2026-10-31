@@ -35,7 +35,7 @@ async function findContactId(email: string): Promise<string | null> {
   return r.results[0]?.id ?? null;
 }
 
-async function upsertContact(order: ShopifyOrder): Promise<string> {
+async function upsertContact(order: ShopifyOrder): Promise<{ id: string; action: "created" | "updated" }> {
   const properties = {
     email: order.email!,
     firstname: order.customer?.first_name ?? "",
@@ -45,29 +45,45 @@ async function upsertContact(order: ShopifyOrder): Promise<string> {
   const existing = await findContactId(order.email!);
   if (existing) {
     await hs("PATCH", `/crm/v3/objects/contacts/${existing}`, { properties });
-    return existing;
+    return { id: existing, action: "updated" };
   }
   const created = await hs<{ id: string }>("POST", "/crm/v3/objects/contacts", { properties });
-  return created.id;
+  return { id: created.id, action: "created" };
 }
 
-async function dealExists(dealName: string): Promise<boolean> {
-  const r = await hs<{ total: number }>("POST", "/crm/v3/objects/deals/search", {
+async function findDealId(dealName: string): Promise<string | null> {
+  const r = await hs<{ results: { id: string }[] }>("POST", "/crm/v3/objects/deals/search", {
     filterGroups: [{ filters: [{ propertyName: "dealname", operator: "EQ", value: dealName }] }],
     limit: 1,
   });
-  return r.total > 0;
+  return r.results[0]?.id ?? null;
 }
 
+export interface SyncResult {
+  contactId: string;
+  contactAction: "created" | "updated";
+  dealId: string;
+  dealAction: "created" | "already existed";
+}
+
+/** Optional progress hook, used by the live portfolio demo to show each step. */
+export type StepReporter = (step: string, detail?: string) => Promise<void> | void;
+
 /** Idempotent: safe to run more than once for the same order. */
-export async function syncOrderToHubSpot(order: ShopifyOrder): Promise<void> {
+export async function syncOrderToHubSpot(order: ShopifyOrder, report: StepReporter = () => {}): Promise<SyncResult> {
   if (!order.email) throw new UnrecoverableError(`Order ${order.name} has no email; skipping`);
 
-  const contactId = await upsertContact(order);
-  const dealName = `Shopify Order ${order.name}`;
-  if (await dealExists(dealName)) return;
+  const contact = await upsertContact(order);
+  await report(`HubSpot contact ${contact.action}`, `contact id ${contact.id} (upserted by email)`);
 
-  await hs("POST", "/crm/v3/objects/deals", {
+  const dealName = `Shopify Order ${order.name}`;
+  const existingDeal = await findDealId(dealName);
+  if (existingDeal) {
+    await report("Deal already exists, skipped (idempotent)", `deal id ${existingDeal}`);
+    return { contactId: contact.id, contactAction: contact.action, dealId: existingDeal, dealAction: "already existed" };
+  }
+
+  const deal = await hs<{ id: string }>("POST", "/crm/v3/objects/deals", {
     properties: {
       dealname: dealName,
       amount: order.total_price,
@@ -76,9 +92,11 @@ export async function syncOrderToHubSpot(order: ShopifyOrder): Promise<void> {
     },
     associations: [
       {
-        to: { id: contactId },
+        to: { id: contact.id },
         types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: DEAL_TO_CONTACT }],
       },
     ],
   });
+  await report("HubSpot deal created and linked to contact", `deal id ${deal.id} · ${order.total_price} ${order.currency} · closed won`);
+  return { contactId: contact.id, contactAction: contact.action, dealId: deal.id, dealAction: "created" };
 }
